@@ -1,0 +1,314 @@
+# =======================
+# UV Generation Rate (eV-based) for beta-Ga2O3 / SiO2 / Si stack
+# Research-paper-based material import for beta-Ga2O3 (tensor or nk CSV).
+# =======================
+
+clear; closeall;
+
+# ---------- User parameters ----------
+# Geometry (nm)
+th_gao3 = 200;     # beta-Ga2O3
+th_sio2 = 500;     # glass (SiO2)
+th_si   = 1000;    # silicon substrate thickness simulated
+
+# Lateral size (periodic/plane)
+Lx = 2e3;          # nm
+Ly = 2e3;          # nm
+
+# Energy sweep (eV)
+E_MIN = 3.0;
+E_MAX = 6.5;
+NE    = 41;
+
+# Mesh (nm)
+mesh_dx = 5;
+mesh_dy = 5;
+mesh_dz = 2;
+
+# ---------- File inputs for beta-Ga2O3 ----------
+# Option A (preferred): dielectric-tensor CSV (e.g., digitized from Sturm et al. 0.5–8.5 eV)
+# Headers required: E_eV,eps1_xx,eps2_xx,eps1_yy,eps2_yy,eps1_zz,eps2_zz
+BETA_GA2O3_TENSOR_CSV = "beta_Ga2O3_dielectric_tensor.csv";   # set to "" to skip
+
+# Option B: nk CSV (isotropic). Headers required: E_eV,n,k
+BETA_GA2O3_NK_CSV     = "beta_Ga2O3_nk_eV.csv";               # used if tensor CSV missing/empty
+
+# Fallback (if no CSVs found): constants
+FALLBACK_n = 1.95;
+FALLBACK_k = 0.02;
+
+# ---------- Constants ----------
+pi = 3.141592653589793;
+c0 = 2.99792458e8;          # m/s
+eps0 = 8.854187817e-12;     # F/m
+h   = 6.62607015e-34;       # J*s
+hbar = h/(2*pi);
+q_e = 1.602176634e-19;      # C
+nm  = 1e-9;
+um  = 1e-6;
+
+# Helpers
+function ev_to_freq(ev)        { return ev*q_e/h; }                # Hz
+function ev_to_lambda_nm(ev)   { return c0/ev_to_freq(ev)/nm; }    # nm
+
+# Convert E-eV to λ-nm arrays (monotonic increasing in λ for Lumerical)
+function EeV_to_lambda_nm(EeV) {
+  return ev_to_lambda_nm(EeV);
+}
+
+# ---------- Material import helpers ----------
+# Average tensor -> isotropic eps: <eps> = (eps_xx + eps_yy + eps_zz)/3, n+ik = sqrt(eps)
+function nk_from_tensor_csv(csvfile) {
+  if (csvfile=="" or not(fileexists(csvfile))) { return struct; }
+  M = read(csvfile);
+  # Expect first row headers; detect columns
+  # Build a small header map
+  headers = M(1,1:end);
+  # Helper to find column by name (case-insensitive)
+  function colidx(name) {
+    return find(lower(headers)==lower(name));
+  }
+  cE   = colidx("E_eV");
+  c1xx = colidx("eps1_xx"); c2xx = colidx("eps2_xx");
+  c1yy = colidx("eps1_yy"); c2yy = colidx("eps2_yy");
+  c1zz = colidx("eps1_zz"); c2zz = colidx("eps2_zz");
+  if (length(cE)==0 or length(c1xx)==0 or length(c2xx)==0 or length(c1yy)==0 or length(c2yy)==0 or length(c1zz)==0 or length(c2zz)==0) {
+    ?("Tensor CSV missing required headers; skipping tensor import.");
+    return struct;
+  }
+  # Data rows
+  E  = M(2:end,cE(1));
+  eps1_xx = M(2:end,c1xx(1)); eps2_xx = M(2:end,c2xx(1));
+  eps1_yy = M(2:end,c1yy(1)); eps2_yy = M(2:end,c2yy(1));
+  eps1_zz = M(2:end,c1zz(1)); eps2_zz = M(2:end,c2zz(1));
+
+  # Isotropic reduction
+  eps1_iso = (eps1_xx + eps1_yy + eps1_zz)/3;
+  eps2_iso = (eps2_xx + eps2_yy + eps2_zz)/3;
+  eps_iso  = eps1_iso + 1i*eps2_iso;
+
+  # n,k from sqrt(eps)
+  n_iso = real(sqrt(eps_iso));
+  k_iso = imag(sqrt(eps_iso));
+
+  lam_nm = EeV_to_lambda_nm(E);
+
+  # Ensure increasing wavelength for setmaterial
+  idx = sortind(lam_nm);
+  rtn = struct;
+  rtn.ok = true;
+  rtn.lambda_nm = lam_nm(idx);
+  rtn.n = n_iso(idx);
+  rtn.k = k_iso(idx);
+  return rtn;
+}
+
+# Direct nk CSV loader
+function nk_from_nk_csv(csvfile) {
+  if (csvfile=="" or not(fileexists(csvfile))) { return struct; }
+  M = read(csvfile);
+  headers = M(1,1:end);
+  function colidx(name) { return find(lower(headers)==lower(name)); }
+  cE = colidx("E_eV"); cn = colidx("n"); ck = colidx("k");
+  if (length(cE)==0 or length(cn)==0 or length(ck)==0) {
+    ?("nk CSV missing required headers; skipping nk import.");
+    return struct;
+  }
+  E  = M(2:end,cE(1));
+  n  = M(2:end,cn(1));
+  k  = M(2:end,ck(1));
+  lam_nm = EeV_to_lambda_nm(E);
+  idx = sortind(lam_nm);
+  rtn = struct;
+  rtn.ok = true;
+  rtn.lambda_nm = lam_nm(idx);
+  rtn.n = n(idx);
+  rtn.k = k(idx);
+  return rtn;
+}
+
+# Create or update beta-Ga2O3 material from CSVs (tensor preferred)
+function create_beta_ga2o3_from_csv(matname, tensor_csv, nk_csv, n_fallback, k_fallback, E_MIN, E_MAX) {
+  if (havematerial(matname)) { deletematerial(matname); }
+  addmaterial("Refractive Index"); setmaterial(matname);
+
+  imported = false;
+
+  # Try tensor CSV
+  dat = nk_from_tensor_csv(tensor_csv);
+  if (length(dat)>0 && dat.ok) {
+    # Keep only the spectral window that covers our sweep reasonably
+    lam_min = ev_to_lambda_nm(E_MAX); lam_max = ev_to_lambda_nm(E_MIN);
+    keep = find( (dat.lambda_nm>=lam_min*0.8) & (dat.lambda_nm<=lam_max*1.2) );
+    if (length(keep)>=3) {
+      setmaterial(matname,"n",dat.lambda_nm(keep),dat.n(keep));
+      setmaterial(matname,"k",dat.lambda_nm(keep),dat.k(keep));
+      imported = true;
+      ?("beta-Ga2O3: loaded isotropic n,k from dielectric tensor CSV: "+tensor_csv);
+    }
+  }
+
+  # Else try nk CSV
+  if (not(imported)) {
+    dat2 = nk_from_nk_csv(nk_csv);
+    if (length(dat2)>0 && dat2.ok) {
+      keep = find( (dat2.lambda_nm>=ev_to_lambda_nm(E_MAX)*0.8) & (dat2.lambda_nm<=ev_to_lambda_nm(E_MIN)*1.2) );
+      if (length(keep)>=3) {
+        setmaterial(matname,"n",dat2.lambda_nm(keep),dat2.n(keep));
+        setmaterial(matname,"k",dat2.lambda_nm(keep),dat2.k(keep));
+        imported = true;
+        ?("beta-Ga2O3: loaded n,k from nk CSV: "+nk_csv);
+      }
+    }
+  }
+
+  # Fallback flat n,k in our band
+  if (not(imported)) {
+    lam_pair = [ev_to_lambda_nm(E_MAX), ev_to_lambda_nm(E_MIN)];
+    n_list = [n_fallback, n_fallback];
+    k_list = [k_fallback, k_fallback];
+    setmaterial(matname,"n",lam_pair,n_list);
+    setmaterial(matname,"k",lam_pair,k_list);
+    ?("beta-Ga2O3: using fallback constant n="+num2str(n_fallback)+", k="+num2str(k_fallback));
+  }
+}
+
+# ---------- Simulation region ----------
+addfdtd;
+set("simulation time", 2e-14);            # s
+set("x span", Lx*nm);
+set("y span", Ly*nm);
+set("z min", - (th_sio2+th_si)*nm - 200*nm);
+set("z max",  + (th_gao3)*nm + 400*nm);
+set("mesh type", "uniform");
+set("dx", mesh_dx*nm);
+set("dy", mesh_dy*nm);
+set("dz", mesh_dz*nm);
+set("simulation temperature", 300);
+
+# Periodic sides; PML top/bottom
+set("x min bc", "Periodic");
+set("x max bc", "Periodic");
+set("y min bc", "Periodic");
+set("y max bc", "Periodic");
+set("z min bc", "PML");
+set("z max bc", "PML");
+
+# ---------- Materials ----------
+mat_si   = "Si (Silicon) - Palik";     # or "Si (Silicon) - Aspnes" if present
+mat_sio2 = "SiO2 (Glass) - Palik";     # (Malitson/Sellmeier inside)
+if (not(havematerial(mat_si)))   { ?("Missing "+mat_si+". Choose another Si material (e.g., Aspnes)."); }
+if (not(havematerial(mat_sio2))) { ?("Missing "+mat_sio2+". Choose another SiO2 material."); }
+
+# beta-Ga2O3 from literature (CSV) with fallback
+mat_gao3 = "beta-Ga2O3 (literature)";
+create_beta_ga2o3_from_csv(mat_gao3, BETA_GA2O3_TENSOR_CSV, BETA_GA2O3_NK_CSV, FALLBACK_n, FALLBACK_k, E_MIN, E_MAX);
+
+# ---------- Geometry (Air / Ga2O3 / SiO2 / Si) ----------
+z0 = 0;  # reference at top of Ga2O3
+
+addrect; set("name","Ga2O3"); set("material", mat_gao3);
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z min", (z0 - th_gao3)*nm); set("z max", z0*nm);
+
+addrect; set("name","SiO2"); set("material", mat_sio2);
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z min", (z0 - th_gao3 - th_sio2)*nm); set("z max", (z0 - th_gao3)*nm);
+
+addrect; set("name","Si"); set("material", mat_si);
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z min", (z0 - th_gao3 - th_sio2 - th_si)*nm); set("z max", (z0 - th_gao3 - th_sio2)*nm);
+
+# ---------- Source (plane wave, normal incidence) ----------
+addplane; set("name","UV_source");
+set("injection axis","z"); set("direction","Backward");
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z", (z0 + 150)*nm);
+
+# Frequency sweep from energy sweep
+f_start = ev_to_freq(E_MAX);
+f_stop  = ev_to_freq(E_MIN);
+set("frequency start", f_start);
+set("frequency stop",  f_stop);
+set("polarization angle", 0);
+
+# ---------- Mesh & monitors ----------
+addmesh; set("name","mesh_refine");
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z min", (z0 - th_gao3 - th_sio2 - th_si)*nm);
+set("z max", (z0)*nm);
+set("dx", mesh_dx*nm); set("dy", mesh_dy*nm); set("dz", mesh_dz*nm);
+
+addvolume; set("name","vol");
+set("x span", Lx*nm); set("y span", Ly*nm);
+set("z min", (z0 - th_gao3 - th_sio2 - th_si)*nm);
+set("z max", (z0)*nm);
+set("frequency points", NE);
+
+addpower; set("name","R_top"); set("monitor type","2D Z-normal");
+set("x span", Lx*nm); set("y span", Ly*nm); set("z", (z0 + 120)*nm);
+addpower; set("name","T_bottom"); set("monitor type","2D Z-normal");
+set("x span", Lx*nm); set("y span", Ly*nm); set("z", (z0 - th_gao3 - th_sio2 - th_si - 120)*nm);
+
+# ---------- Run ----------
+run;
+
+# ---------- Extract and compute G ----------
+Eres = getresult("vol","E");
+epsres = getresult("vol","epsilon"); # relative permittivity
+freq = Eres.f; Nf = length(freq);
+
+Ex = pinch(Eres.Ex); Ey = pinch(Eres.Ey); Ez = pinch(Eres.Ez);
+E2 = abs(Ex)^2 + abs(Ey)^2 + abs(Ez)^2;
+
+eps_r = pinch(epsres.epsilon);
+eps_im = imag(eps_r);
+
+# G(x,y,z,f) = eps0 * Im(eps_r) * |E|^2 / (2*hbar)
+G_spec = eps0 * eps_im * E2 / (2*hbar);
+
+# Package spectral dataset
+Gdata = struct;
+Gdata.x = Eres.x; Gdata.y = Eres.y; Gdata.z = Eres.z;
+Gdata.f = freq; Gdata.E_eV = freq*h/q_e;
+Gdata.G = G_spec; Gdata.name = "G_spectral";
+
+# Depth-avg over Ga2O3 for QA
+z = Eres.z;
+zmin_g = (z0 - th_gao3)*nm; zmax_g = z0*nm;
+iz = find(z >= zmin_g & z <= zmax_g);
+G_g = mean(mean(mean(G_spec[,,iz,],1),2),3);
+csv_data = cat(2,transpose(Gdata.E_eV),transpose(G_g));
+write("G_Ga2O3_depthavg_vs_EeV.csv",csv_data);
+
+# Energy-integrated G (flat spectrum weighting; replace with your source S(E) if needed)
+E_axis = Gdata.E_eV;
+E_sort = sort(E_axis);
+idx_sorted = sortind(E_axis);
+G_spec_sorted = G_spec[:,:,:,idx_sorted];
+
+dE = diff(E_sort);
+W = zeros(1,1,1,Nf);
+W[,,,2:Nf-1] = 0.5*(dE[1:Nf-2]+dE[2:Nf-1]);
+W[,,,1] = 0.5*dE[1];
+W[,,,Nf] = 0.5*dE[Nf-1];
+
+G_int = sum(G_spec_sorted * W,4);
+
+Gtot = struct;
+Gtot.x = Eres.x; Gtot.y = Eres.y; Gtot.z = Eres.z;
+Gtot.G_total = G_int; Gtot.name = "G_integrated_eVweighted";
+
+# ---------- Save ----------
+h5save("G_spectral.h5", Gdata);
+h5save("G_integrated.h5", Gtot);
+matlabsave("G_spectral.mat", Gdata);
+matlabsave("G_integrated.mat", Gtot);
+
+visualize(Gdata.E_eV, G_g); exportfigure("G_Ga2O3_depthavg_vs_EeV.png");
+
+GenForCharge = struct;
+GenForCharge.x = Gtot.x; GenForCharge.y = Gtot.y; GenForCharge.z = Gtot.z;
+GenForCharge.generation = Gtot.G_total; GenForCharge.name = "G_total";
+h5save("G_for_CHARGE.h5", GenForCharge);
+matlabsave("G_for_CHARGE.mat", GenForCharge);
