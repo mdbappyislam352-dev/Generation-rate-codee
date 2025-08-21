@@ -1,0 +1,107 @@
+% FILE: make_generation_mat_ga2o3.m
+% Purpose: create X,Y,Z,G for beta-Ga2O3 charge region and save generation_rate.mat
+% Units: meters (X,Y,Z), G in 1/m^3/s
+
+clear; close all; clc;
+
+%% ----------------- USER PARAMETERS -----------------
+lambda = 230e-9;        % illumination wavelength (m) - change as needed
+I0_surf = 500;          % incident power density at surface (W/m^2) (peak for Gaussian or uniform value)
+alpha = 1e7;            % absorption coefficient for Ga2O3 at lambda (1/m) - replace with real data
+t_ga2o3 = 400e-9;       % Ga2O3 thickness (m)
+x_span = 2.0e-6;        % lateral x size (m)
+y_span = 2.0e-6;        % lateral y size (m)
+
+Nx = 101; Ny = 101; Nz = 101;   % grid points (adjust for memory/speed)
+
+% Choose lateral beam profile:
+useGaussian = true;     % true -> Gaussian beam, false -> uniform illumination
+beam_waist = 0.6e-6;    % 1/e^2 radius of Gaussian (m), only used if useGaussian==true
+beam_center = [0,0];    % center (x0,y0) in meters (default center)
+
+% If you want G in cm^-3 s^-1 for Lumerical that expects cm units, set:
+save_in_cm3 = false;    % false => keep G in 1/m^3/s. true => convert to 1/cm^3/s
+
+%% ----------------- constants -----------------
+h = 6.62607015e-34;     % Planck's constant (J*s)
+c = 299792458;          % speed of light (m/s)
+freq = c / lambda;      % optical frequency (Hz)
+photonE = h * freq;     % photon energy (J)
+
+%% ----------------- create grid -----------------
+% 1D axes (we use centered axes)
+x = linspace(-x_span/2, x_span/2, Nx);
+y = linspace(-y_span/2, y_span/2, Ny);
+z = linspace(0, t_ga2o3, Nz);   % z=0 at top surface, into film
+
+% Make 3D grids using ndgrid so that G(i,j,k) corresponds to x(i), y(j), z(k)
+[Xg, Yg, Zg] = ndgrid(x, y, z);   % sizes: [Nx, Ny, Nz]
+
+%% ----------------- lateral intensity profile I0(x,y) -----------------
+if useGaussian
+    x0 = beam_center(1);
+    y0 = beam_center(2);
+    % Gaussian (peak = I0_surf at center)
+    R2 = (Xg(:,:,1) - x0).^2 + (Yg(:,:,1) - y0).^2;  % sample at z-plane (same for all z)
+    I0_xy = I0_surf * exp(-2 * R2 / beam_waist^2);    % 1/e^2 waist convention (factor 2)
+else
+    I0_xy = I0_surf * ones(Nx, Ny);
+end
+
+%% ----------------- compute G(x,y,z) -----------------
+% Beer-Lambert: I(x,y,z) = I0(x,y) * exp(-alpha * z)
+% Local absorbed power density p_abs = alpha * I(x,y,z) [W/m^3]
+% Generation: G = p_abs / (h*freq) [1/m^3/s]
+
+% Preallocate
+G = zeros(Nx, Ny, Nz);
+
+% Vectorized compute: compute exp(-alpha*z) once
+exp_alpha_z = exp(-alpha * z);   % 1 x Nz
+
+% Use broadcasting via bsxfun-like indexing:
+for k = 1:Nz
+    % I at depth z(k)
+    Iz = I0_xy * exp_alpha_z(k);   % Nx x Ny
+    Pabs_vol = alpha * Iz;         % W/m^3
+    G(:,:,k) = Pabs_vol / photonE; % 1/m^3/s
+end
+
+%% ----------------- optional conversion to cm^-3 s^-1 -----------------
+if save_in_cm3
+    % 1 / m^3 = 1e-6 / cm^3  => to convert G (1/m^3/s) -> 1/cm^3/s multiply by 1e-6
+    G_cm3 = G * 1e-6;
+    G_out = G_cm3;
+    disp('Converted G to 1/cm^3/s and will save that in .mat');
+else
+    G_out = G;
+    disp('G left in 1/m^3/s');
+end
+
+%% ----------------- save .mat -----------------
+% Save 1D axes and 3D G array (dimensions: Nx x Ny x Nz)
+save_filename = 'generation_rate.mat';
+X = x; Y = y; Z = z;   %#ok<NASGU>  % names expected by Lumerical
+G = G_out;             %#ok<NASGU>
+save(save_filename, 'X', 'Y', 'Z', 'G', '-v7.3');   % -v7.3 for large arrays
+
+fprintf('Saved .mat file: %s  (X: %d, Y: %d, Z: %d, G size: %s)\n', ...
+    save_filename, length(X), length(Y), length(Z), mat2str(size(G)));
+
+%% ----------------- quick sanity plots -----------------
+% Plot G(z) at center
+ix = round(Nx/2); iy = round(Ny/2);
+Gcenter_z = squeeze(G(ix, iy, :));
+figure;
+semilogy(Z*1e9, Gcenter_z);
+xlabel('z (nm)'); ylabel('G (1/m^3/s)');
+title('G(z) at beam center (log scale)');
+grid on;
+
+% Optional: plot 2D map at mid-depth
+kmid = round(Nz/2);
+figure;
+imagesc(x*1e6, y*1e6, squeeze(G(:,:,kmid)));
+axis xy; colorbar;
+xlabel('x (um)'); ylabel('y (um)');
+title(sprintf('G at z = %.1f nm', Z(kmid)*1e9));
