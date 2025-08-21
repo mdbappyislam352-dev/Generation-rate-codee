@@ -1,0 +1,78 @@
+%% FILE: beta_ga2o3_fdtd_generation.m
+% Purpose: create optical generation rate G(x,y,z) for beta-Ga2O3
+% using FDTD-style Beer-Lambert approximation
+% Save .mat file for Lumerical CHARGE import
+
+clear; clc; close all;
+
+%% ---------------- PARAMETERS ----------------
+lambda = 254e-9;       % wavelength (m)
+I0_surf = 1000;        % incident power density (W/m^2)
+alpha = 7e6;           % absorption coefficient (1/m) for beta-Ga2O3
+t_ga2o3 = 600e-9;      % thickness of Ga2O3 (m)
+x_span = 2.0e-6;       % lateral x size (m)
+y_span = 2.0e-6;       % lateral y size (m)
+
+Nx = 101; Ny = 101; Nz = 101;   % grid points
+
+useGaussian = false;    % true -> lateral Gaussian beam, false -> uniform
+
+%% ---------------- CONSTANTS ----------------
+h = 6.62607015e-34;    % Planck constant (J*s)
+c = 299792458;          % speed of light (m/s)
+freq = c / lambda;      % optical frequency (Hz)
+photonE = h*freq;       % photon energy (J)
+
+%% ---------------- GRID ----------------
+x = linspace(-x_span/2, x_span/2, Nx);
+y = linspace(-y_span/2, y_span/2, Ny);
+z = linspace(0, t_ga2o3, Nz);
+
+[X, Y, Z] = ndgrid(x, y, z);
+
+%% ---------------- LATERAL INTENSITY ----------------
+if useGaussian
+    waist = 0.6e-6; x0=0; y0=0;
+    R2 = (X(:,:,1)-x0).^2 + (Y(:,:,1)-y0).^2;
+    I0_xy = I0_surf*exp(-2*R2/waist^2);
+else
+    I0_xy = I0_surf*ones(Nx, Ny);
+end
+
+%% ---------------- COMPUTE G(x,y,z) ----------------
+G = zeros(Nx,Ny,Nz);
+
+exp_alpha_z = exp(-alpha*z);   % 1 x Nz
+
+for k = 1:Nz
+    Iz = I0_xy * exp_alpha_z(k);    % Nx x Ny
+    Pabs = alpha*Iz;                % W/m^3
+    G(:,:,k) = Pabs / photonE;     % 1/m^3/s
+end
+
+%% ---------------- OPTIONAL CONVERSION ----------------
+save_in_cm3 = false;  % true -> 1/cm^3/s
+if save_in_cm3
+    G = G*1e-6;  % convert 1/m^3/s -> 1/cm^3/s
+end
+
+%% ---------------- SAVE MAT FILE ----------------
+save('beta_ga2o3_generation.mat','X','Y','Z','G','-v7.3');
+
+fprintf('Saved beta_ga2o3_generation.mat with size G = [%d,%d,%d]\n', size(G));
+
+%% ---------------- QUICK PLOTS ----------------
+% G(z) at center
+ix = round(Nx/2); iy = round(Ny/2);
+figure;
+semilogy(z*1e9, squeeze(G(ix,iy,:)));
+xlabel('z (nm)'); ylabel('G (1/m^3/s)');
+title('Optical generation G(z) at beam center');
+
+% 2D slice at mid z
+kmid = round(Nz/2);
+figure;
+imagesc(x*1e6, y*1e6, squeeze(G(:,:,kmid)));
+axis xy; colorbar;
+xlabel('x (\mum)'); ylabel('y (\mum)');
+title(sprintf('G(x,y) at z = %.1f nm', z(kmid)*1e9));
